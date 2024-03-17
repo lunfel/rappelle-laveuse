@@ -34,9 +34,6 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let wifi_name = "NOKIA-7870";
-    let wifi_password = "d3p8pbGy5b";
-
     defmt::info!("Initializing...");
 
     let peripherals = embassy_rp::init(Default::default());
