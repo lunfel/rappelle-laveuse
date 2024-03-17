@@ -4,10 +4,11 @@
 #![no_std]
 #![no_main]
 
+use core::time::Duration;
 use bsp::entry;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::v2::{InputPin, OutputPin};
 use panic_probe as _;
 
 // Provide an alias for our BSP so we can switch targets quickly.
@@ -21,6 +22,7 @@ use bsp::hal::{
     sio::Sio,
     watchdog::Watchdog,
 };
+use cortex_m::asm::delay;
 
 #[entry]
 fn main() -> ! {
@@ -63,13 +65,41 @@ fn main() -> ! {
     // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
     // in series with the LED.
     let mut led_pin = pins.gpio16.into_push_pull_output();
+    let mut vib_pin = pins.gpio17.into_pull_down_input();
+
+    let cycles_per_blocks = 200;
+    let mut block = 1;
+    let mut cycles = 0;
+    let mut vibration_detected_in_last_block = false;
 
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        if vib_pin.is_high().unwrap() {
+            vibration_detected_in_last_block = true;
+        }
+
+        if cycles % cycles_per_blocks == 0 {
+            if vibration_detected_in_last_block {
+                led_pin.set_high().unwrap();
+                info!("{}. On!", block);
+            } else {
+                led_pin.set_low().unwrap();
+                info!("{}. Off!", block);
+            }
+
+            vibration_detected_in_last_block = false;
+            cycles = 0;
+            block += 1;
+        }
+
+        delay.delay_ms(1);
+
+        cycles += 1;
+
+        // info!("on!");
+        // led_pin.set_high().unwrap();
+        // delay.delay_ms(500);
+        // info!("off!");
+        // led_pin.set_low().unwrap();
+        // delay.delay_ms(500);
     }
 }
