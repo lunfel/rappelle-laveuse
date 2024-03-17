@@ -1,71 +1,80 @@
-//! Blinks the LED on a Pico board
-//!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
 #![no_std]
 #![no_main]
+#![allow(async_fn_in_trait)]
 
-use core::time::Duration;
-use bsp::entry;
+//! This example uses the RP Pico W board Wifi chip (cyw43).
+//! Scans Wifi for ssid names.
+use core::str;
+
+use cyw43_pio::PioSpi;
 use defmt::*;
-use defmt_rtt as _;
-use embedded_hal::digital::v2::{InputPin, OutputPin};
-use panic_probe as _;
+use embassy_executor::Spawner;
+use embassy_net::Stack;
+use embassy_rp::bind_interrupts;
+use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::peripherals::{DMA_CH0, PIO0};
+use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_time::{Duration, Timer};
+use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
-// Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
-use rp_pico as bsp;
-// use sparkfun_pro_micro_rp2040 as bsp;
+bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => InterruptHandler<PIO0>;
+});
 
-use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    pac,
-    sio::Sio,
-    watchdog::Watchdog,
-};
-use cortex_m::asm::delay;
+#[embassy_executor::task]
+async fn wifi_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>) -> ! {
+    runner.run().await
+}
 
-#[entry]
-fn main() -> ! {
-    info!("Program start");
-    let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let sio = Sio::new(pac.SIO);
+#[embassy_executor::task]
+async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
+    stack.run().await
+}
 
-    // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000u32;
-    let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-        .ok()
-        .unwrap();
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let wifi_name = "NOKIA-7870";
+    let wifi_password = "d3p8pbGy5b";
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    defmt::info!("Initializing...");
 
-    let pins = bsp::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut pac.RESETS,
-    );
+    let peripherals = embassy_rp::init(Default::default());
 
-    // This is the correct pin on the Raspberry Pico board. On other boards, even if they have an
-    // on-board LED, it might need to be changed.
-    //
-    // Notably, on the Pico W, the LED is not connected to any of the RP2040 GPIOs but to the cyw43 module instead.
-    // One way to do that is by using [embassy](https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/wifi_blinky.rs)
-    //
-    // If you have a Pico W and want to toggle a LED with a simple GPIO output pin, you can connect an external
-    // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
-    // in series with the LED.
-    let mut led_pin = pins.gpio16.into_push_pull_output();
-    let mut vib_pin = pins.gpio17.into_pull_down_input();
+    // For Wi-Fi according to example here: https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/wifi_scan.rs
+    let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
+    let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
+
+    let pwr = Output::new(peripherals.PIN_23, Level::Low);
+    let cs = Output::new(peripherals.PIN_25, Level::High);
+    let mut pio = Pio::new(peripherals.PIO0, Irqs);
+    let spi = PioSpi::new(&mut pio.common, pio.sm0, pio.irq0, cs, peripherals.PIN_24, peripherals.PIN_29, peripherals.DMA_CH0);
+
+    static STATE: StaticCell<cyw43::State> = StaticCell::new();
+    let state = STATE.init(cyw43::State::new());
+    let (_net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
+    unwrap!(spawner.spawn(wifi_task(runner)));
+
+    control.init(clm).await;
+    control
+        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .await;
+
+    // let mut scanner = control.scan(Default::default()).await;
+    // while let Some(bss) = scanner.next().await {
+    //     if let Ok(ssid_str) = str::from_utf8(&bss.ssid) {
+    //         info!("scanned {} == {:x}", ssid_str, bss.bssid);
+    //     }
+    // }
+
+    let result = control.join_wpa2(wifi_name, wifi_password).await;
+
+
+
+    let mut led_pin = Output::new(peripherals.PIN_16, Level::Low);
+    let vib_pin = Input::new(peripherals.PIN_17, Pull::Down);
+
+    defmt::info!("Initialized.");
 
     let cycles_per_blocks = 200;
     let mut block = 1;
@@ -73,16 +82,16 @@ fn main() -> ! {
     let mut vibration_detected_in_last_block = false;
 
     loop {
-        if vib_pin.is_high().unwrap() {
+        if vib_pin.is_high() {
             vibration_detected_in_last_block = true;
         }
 
         if cycles % cycles_per_blocks == 0 {
             if vibration_detected_in_last_block {
-                led_pin.set_high().unwrap();
+                led_pin.set_high();
                 info!("{}. On!", block);
             } else {
-                led_pin.set_low().unwrap();
+                led_pin.set_low();
                 info!("{}. Off!", block);
             }
 
@@ -91,15 +100,8 @@ fn main() -> ! {
             block += 1;
         }
 
-        delay.delay_ms(1);
+        Timer::after(Duration::from_millis(1)).await;
 
         cycles += 1;
-
-        // info!("on!");
-        // led_pin.set_high().unwrap();
-        // delay.delay_ms(500);
-        // info!("off!");
-        // led_pin.set_low().unwrap();
-        // delay.delay_ms(500);
     }
 }
